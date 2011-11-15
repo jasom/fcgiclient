@@ -133,8 +133,7 @@
                                 for p = (fcc-pollitem val)
                                 do (setf (zmq:pollitem-events p) zmq:pollin)
                                 collect p))
-               (pollingm2 t)
-                 ;(not (null sockets)))
+               (pollingm2 (< (hash-table-count active-conns) num-conns))
                (pollitems (if pollingm2 (cons m2poll pollitems) pollitems))
                (revents (zmq:poll pollitems)))
           (when pollingm2
@@ -171,7 +170,6 @@
                          (when (request-closep (fcc-req fcc)) (reply-close (fcc-req fcc)))
                          (remhash fd active-conns)
                          (close (fcc-socket fcc))))))))))))
-                         ;(rplacd (last sockets) (list (fcc-socket fcc)))))))))))))
 
 
 
