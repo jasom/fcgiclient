@@ -39,7 +39,6 @@
 (defparameter +fcgi-header+ '(1 1 2 2 1))
 (defparameter +fcgi-begin-request-body+ '(2 1))
 (defparameter +fcgi-end-request-body+ '(4 1))
-(ql:quickload :iolib.sockets)
 
 
 (defstruct fcgi-record
@@ -168,7 +167,30 @@
              :content-length +fcgi-begin-request-body-length+)))
   (sendall sock (fcgi-record-to-bytes (make-fcgi-params env id)))
   (sendall sock (fcgi-record-to-bytes (make-fcgi-params nil id)))
+  ;TODO only on POST
+  (sendall sock
+           (fcgi-record-to-bytes (make-fcgi-record
+                                   :type +fcgi-stdin+
+                                   :request-id id
+                                   :payload bod
+                                   :content-length (length bod))))
+  (apply #'concatenate '(simple-array (unsigned-byte 8) (*))
+                       (loop for record = (read-record sock)
+                             while (not (= (fcgi-record-type record) +fcgi-end-request+))
+                             when (= (fcgi-record-type record) +fcgi-stdout+)
+                             collect (fcgi-record-payload record))))
+
+(defun start-request (sock env bod &key (id 1) (keep nil))
+  (sendall sock 
+           (fcgi-record-to-bytes (make-fcgi-record
+                                   :type +fcgi-begin-request+
+                                   :request-id id
+                                   :payload (coerce (list 0 +fcgi-responder+ (if keep +fcgi-keep-conn+ 0)) '(simple-array (unsigned-byte 8) (*)))
+                                   :content-length +fcgi-begin-request-body-length+)))
+  (sendall sock (fcgi-record-to-bytes (make-fcgi-params env id)))
+  (sendall sock (fcgi-record-to-bytes (make-fcgi-params nil id)))
   ;(when  (> (length bod) 0)
+  ;TODO only on POST
   (sendall sock
            (fcgi-record-to-bytes (make-fcgi-record
                                    :type +fcgi-stdin+
@@ -176,15 +198,20 @@
                                    :payload bod
                                    :content-length (length bod))))
   ;)
-  ;(sendall sock (fcgi-record-to-bytes (make-fcgi-record
-             ;:type +fcgi-data+
-             ;:request-id id)))
+  )
 
-  (apply #'concatenate '(simple-array (unsigned-byte 8) (*))
-                       (loop for record = (read-record sock)
-                             while (not (= (fcgi-record-type record) +fcgi-end-request+))
-                             when (= (fcgi-record-type record) +fcgi-stdout+)
-                             collect (fcgi-record-payload record))))
+(defun do-some (sock &optional (sofar ()))
+  (let ((record (read-record sock)))
+    (if (= (fcgi-record-type record) +fcgi-end-request+)
+      (values sofar t)
+      (if (= (fcgi-record-type record) +fcgi-stdout+)
+        (values (push (fcgi-record-payload record) sofar) nil)
+        (values sofar nil)))))
+
+(defun get-result (list)
+  (apply #'concatenate '(simple-array (unsigned-byte 8) (*)) (nreverse list)))
+
+  
 (defun hello-world ()
   (map 'string #'code-char (iolib.sockets:with-open-socket (s :remote-host "localhost" :remote-port 9000       
 				     :address-family :internet             
