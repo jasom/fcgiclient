@@ -72,45 +72,16 @@
 
 (defun m2fcgi (m2-in m2-out m2-id fcgi-host fcgi-port fcgi-script &aux (fcgi-id 1))
   (with-connection (m2c m2-id m2-in m2-out)
-      (iolib.sockets:with-open-socket (s
-                                        :remote-host fcgi-host
-                                        :remote-port fcgi-port
-                                        :type :stream
-                                        :connect :active)
           (loop
             ;(print "X")
             (let ((req (recv)))
               ;(print req)
               (when (not (request-disconnectp req))
-                (let* ((env (make-fcgi-environment req fcgi-script))
-                       (response (do-request s env (request-body req)
-                                             :id fcgi-id
-                                             :keep t)))
-                  (declare (type list env)
-                           (type (simple-array (unsigned-byte 8) (*)) response))
-                  ;(print (request-headers req))
-                  ;(print response)
-                  (multiple-value-bind (header body-start) (fix-fcgi-headers response)
-                    (reply req header)
-                    (reply req (subseq response body-start))))
-                (when (request-closep req) (reply-close req))))
-            ;(incf fcgi-id)
-            ))))
-
-(require :sb-sprof)
-(defun m2fcgi-profile (m2-in m2-out m2-id fcgi-host fcgi-port fcgi-script &aux (fcgi-id 1))
-  (with-connection (m2c m2-id m2-in m2-out)
-      (iolib.sockets:with-open-socket (s
+                (iolib.sockets:with-open-socket (s
                                         :remote-host fcgi-host
                                         :remote-port fcgi-port
                                         :type :stream
                                         :connect :active)
-    (sb-sprof:with-profiling (:sample-interval 0.01 :max-samples 10000 :report :graph :loop t :reset t)
-          (dotimes (i 100)
-            ;(print "X")
-            (let ((req (recv)))
-              ;(print req)
-              (when (not (request-disconnectp req))
                 (let* ((env (make-fcgi-environment req fcgi-script))
                        (response (do-request s env (request-body req)
                                              :id fcgi-id
@@ -121,21 +92,96 @@
                   ;(print response)
                   (multiple-value-bind (header body-start) (fix-fcgi-headers response)
                     (reply req header)
-                    (reply req (subseq response body-start))))
-                (when (request-closep req) (reply-close req))))
-            ;(incf fcgi-id)
-            )))))
+                    (reply req (subseq response body-start)))))
+                (when (request-closep req) (reply-close req)))))))
+
+(defstruct (fcgi-connection (:conc-name fcc-))
+  (socket nil)
+  (sofar () :type list)
+  (pollitem nil :type zmq:pollitem)
+  (req nil))
+
+
+(defun m2fcgi-fancy (m2-in m2-out m2-id fcgi-host fcgi-port fcgi-script
+                           &optional (num-conns 35)
+                           &aux (fcgi-id 1)
+                           (active-conns (make-hash-table)))
+  (flet ((c2fcgi ()
+          (iolib.sockets:make-socket
+                                           :address-family :internet
+                                           :type :stream
+                                           :connect :active
+                                           :remote-host fcgi-host
+                                           :remote-port fcgi-port)))
+
+  ;(let ((sockets
+          ;(loop repeat num-conns collect (iolib.sockets:make-socket
+                                           ;:address-family :internet
+                                           ;:type :stream
+                                           ;:connect :active
+                                           ;:remote-host fcgi-host
+                                           ;:remote-port fcgi-port))))
+
+  (with-connection (m2c m2-id m2-in m2-out)
+    (let ((m2poll (make-instance 'zmq:pollitem
+                                 :socket (slot-value *current-connection*
+                                                                  'mymongrel2::reqs)
+                                 :events zmq:pollin)))
+      (loop
+        (setf (zmq:pollitem-events m2poll) zmq:pollin)
+        (let* ((pollitems (loop for val being the hash-values of active-conns
+                                for p = (fcc-pollitem val)
+                                do (setf (zmq:pollitem-events p) zmq:pollin)
+                                collect p))
+               (pollingm2 t)
+                 ;(not (null sockets)))
+               (pollitems (if pollingm2 (cons m2poll pollitems) pollitems))
+               (revents (zmq:poll pollitems)))
+          (when pollingm2
+            (pop pollitems)
+            (when (= (pop revents) zmq:pollin)
+              (let ((req (recv)))
+                (when (not (request-disconnectp req))
+                  (let
+                       ((env (make-fcgi-environment req fcgi-script))
+                        (s (c2fcgi)))
+                       (setf (gethash (iolib.sockets:socket-os-fd s) active-conns)
+                                      (make-fcgi-connection
+                                        :socket s
+                                        :sofar ()
+                                        :pollitem (make-instance 'zmq:pollitem
+                                                                 :fd (iolib.sockets:socket-os-fd s)
+                                                                 :events zmq:pollin)
+                                        :req req))
+                       (fcgiclient::start-request s env (request-body req)
+                                             :id fcgi-id
+                                             :keep t))))))
+          (loop for ev in revents
+                for p in pollitems
+                for fd = (zmq:pollitem-fd p)
+                for fcc = (gethash fd active-conns)
+                do (multiple-value-bind (sofar done)
+                     (fcgiclient::do-some (fcc-socket fcc) (fcc-sofar fcc))
+                     (if (not done)
+                       (setf (fcc-sofar fcc) sofar)
+                       (let ((response (fcgiclient::get-result sofar)))
+                         (multiple-value-bind (header body-start) (fix-fcgi-headers response)
+                           (reply (fcc-req fcc) header)
+                           (reply (fcc-req fcc) (subseq response body-start)))
+                         (when (request-closep (fcc-req fcc)) (reply-close (fcc-req fcc)))
+                         (remhash fd active-conns)
+                         (close (fcc-socket fcc))))))))))))
+                         ;(rplacd (last sockets) (list (fcc-socket fcc)))))))))))))
 
 
 
-(defun profile-it () 
-  (m2fcgi-profile "tcp://127.0.0.1:9993" "tcp://127.0.0.1:9992"
-          (format nil "~X" (random (ash 1 64)))
-          "localhost" 9000 "foo.php"))
 
 (defun test () 
   (m2fcgi "tcp://127.0.0.1:9993" "tcp://127.0.0.1:9992"
           (format nil "~X" (random (ash 1 64)))
           "localhost" 9000 "foo.php"))
-
+(defun test-fancy () 
+  (m2fcgi-fancy "tcp://127.0.0.1:9993" "tcp://127.0.0.1:9992"
+          (format nil "~X" (random (ash 1 64)))
+          "localhost" 9000 "foo.php"))
 (setq *random-state* (make-random-state t))
