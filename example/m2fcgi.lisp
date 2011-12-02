@@ -4,7 +4,6 @@
 
 (use-package :mymongrel2)
 (use-package :alexandria)
-(use-package :fcgiclient)
 
 (declaim (optimize (speed 3)))
 
@@ -83,9 +82,9 @@
                                         :type :stream
                                         :connect :active)
                 (let* ((env (make-fcgi-environment req fcgi-script))
-                       (response (do-request s env (request-body req)
-                                             :id fcgi-id
-                                             :keep t)))
+                       (response (fcgiclient:do-request s env (request-body req)
+                                                        :id fcgi-id
+                                                        :keep t)))
                   (declare (type list env)
                            (type (simple-array (unsigned-byte 8) (*)) response))
                   ;(print (request-headers req))
@@ -152,7 +151,7 @@
                                                                  :fd (iolib.sockets:socket-os-fd s)
                                                                  :events zmq:pollin)
                                         :req req))
-                       (fcgiclient::start-request s env (request-body req)
+                       (fcgiclient:start-request s env (request-body req)
                                              :id fcgi-id
                                              :keep t))))))
           (loop for ev in revents
@@ -160,10 +159,10 @@
                 for fd = (zmq:pollitem-fd p)
                 for fcc = (gethash fd active-conns)
                 do (multiple-value-bind (sofar done)
-                     (fcgiclient::do-some (fcc-socket fcc) (fcc-sofar fcc))
+                     (fcgiclient:do-some (fcc-socket fcc) (fcc-sofar fcc))
                      (if (not done)
                        (setf (fcc-sofar fcc) sofar)
-                       (let ((response (fcgiclient::get-result sofar)))
+                       (let ((response (fcgiclient:get-result sofar)))
                          (multiple-value-bind (header body-start) (fix-fcgi-headers response)
                            (reply (fcc-req fcc) header)
                            (reply (fcc-req fcc) (subseq response body-start)))
