@@ -1,4 +1,5 @@
 ;;;; fcgiclient.lisp
+;;;; Copyright 2011 Jason Miller
 
 (declaim (optimize (speed 3)))
 
